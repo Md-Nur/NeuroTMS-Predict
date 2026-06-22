@@ -5,3 +5,4 @@ shap
 joblib
 pandas
 numpy
+lime
