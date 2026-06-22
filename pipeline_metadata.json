@@ -1,0 +1,39 @@
+{
+    "stage1_features": [
+        "FastRipples",
+        "Spikes",
+        "NREM",
+        "REM",
+        "FR_Delta_Coupling",
+        "Sleep_Fragmentation",
+        "DPI"
+    ],
+    "stage2_features": [
+        "FastRipples",
+        "Spikes",
+        "NREM",
+        "REM",
+        "FR_Delta_Coupling",
+        "Sleep_Fragmentation",
+        "DPI",
+        "Risk_Score",
+        "TMS"
+    ],
+    "feature_medians": {
+        "FastRipples": 7.0,
+        "Spikes": 116.5,
+        "NREM": 66.57594437438516,
+        "REM": 2.01399369824978,
+        "FR_Delta_Coupling": 4.684128789976999,
+        "Sleep_Fragmentation": 46.61295606656199,
+        "DPI": 28.0
+    },
+    "metrics": {
+        "stage1_loso_accuracy": 0.9222222222222223,
+        "stage1_loso_auc": 0.9510493827160494,
+        "stage2_loso_accuracy": 0.9277777777777778,
+        "stage2_loso_auc": 0.9635802469135804
+    },
+    "risk_threshold": 0.4726057944587994,
+    "outcome_threshold": 0.5273942055412006
+}
