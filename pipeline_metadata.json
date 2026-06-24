@@ -1,39 +1,106 @@
 {
-    "stage1_features": [
-        "FastRipples",
-        "Spikes",
-        "NREM",
-        "REM",
-        "FR_Delta_Coupling",
-        "Sleep_Fragmentation",
-        "DPI"
-    ],
-    "stage2_features": [
-        "FastRipples",
-        "Spikes",
-        "NREM",
-        "REM",
-        "FR_Delta_Coupling",
-        "Sleep_Fragmentation",
-        "DPI",
-        "Risk_Score",
+    "features": [
+        "FastRipples_21",
+        "Spikes_21",
+        "NREM_21",
+        "REM_21",
+        "Wake_21",
+        "Sleep_Fragmentation_21",
+        "FR_Delta_Coupling_21",
+        "FastRipples_28",
+        "Spikes_28",
+        "NREM_28",
+        "REM_28",
+        "Wake_28",
+        "Sleep_Fragmentation_28",
+        "FR_Delta_Coupling_28",
+        "SD",
         "TMS"
     ],
+    "biomarker_features": [
+        "FastRipples_21",
+        "Spikes_21",
+        "NREM_21",
+        "REM_21",
+        "Wake_21",
+        "Sleep_Fragmentation_21",
+        "FR_Delta_Coupling_21",
+        "FastRipples_28",
+        "Spikes_28",
+        "NREM_28",
+        "REM_28",
+        "Wake_28",
+        "Sleep_Fragmentation_28",
+        "FR_Delta_Coupling_28",
+        "SD"
+    ],
     "feature_medians": {
-        "FastRipples": 7.0,
-        "Spikes": 116.5,
-        "NREM": 66.57594437438516,
-        "REM": 2.01399369824978,
-        "FR_Delta_Coupling": 4.684128789976999,
-        "Sleep_Fragmentation": 46.61295606656199,
-        "DPI": 28.0
+        "FastRipples_21": 8.0,
+        "Spikes_21": 122.0,
+        "NREM_21": 66.270961081705,
+        "REM_21": 1.9546402503957414,
+        "Wake_21": 31.96174084315713,
+        "Sleep_Fragmentation_21": 46.97842627369319,
+        "FR_Delta_Coupling_21": 4.979044501715439,
+        "FastRipples_28": 8.0,
+        "Spikes_28": 117.0,
+        "NREM_28": 65.94641587500034,
+        "REM_28": 2.0430864176029173,
+        "Wake_28": 31.793201562751932,
+        "Sleep_Fragmentation_28": 46.61295606656199,
+        "FR_Delta_Coupling_28": 5.0768936663352,
+        "SD": 0.5
     },
     "metrics": {
-        "stage1_loso_accuracy": 0.9222222222222223,
-        "stage1_loso_auc": 0.9510493827160494,
-        "stage2_loso_accuracy": 0.9277777777777778,
-        "stage2_loso_auc": 0.9635802469135804
+        "elastic_net": {
+            "accuracy": {
+                "mean": 0.8973166666666667,
+                "lower": 0.8166666666666667,
+                "upper": 0.9666666666666667
+            },
+            "auc": {
+                "mean": 0.9834808977980207,
+                "lower": 0.95327093703067,
+                "upper": 0.9999999999999999
+            },
+            "f1": {
+                "mean": 0.8956546386927488,
+                "lower": 0.8070033955857385,
+                "upper": 0.9666666666666667
+            }
+        },
+        "random_forest": {
+            "accuracy": {
+                "mean": 0.8649166666666667,
+                "lower": 0.7666666666666667,
+                "upper": 0.95
+            },
+            "auc": {
+                "mean": 0.9450690535596582,
+                "lower": 0.8831822940522148,
+                "upper": 0.9854910714285714
+            },
+            "f1": {
+                "mean": 0.8579568720255817,
+                "lower": 0.75,
+                "upper": 0.944469696969697
+            }
+        }
     },
-    "risk_threshold": 0.4726057944587994,
-    "outcome_threshold": 0.5273942055412006
+    "best_model_name": "Elastic Net",
+    "outcome_stats": {
+        "SeizureThreshold_60": {
+            "0": 3.9815107247203363,
+            "1": 3.965857912514545
+        },
+        "SeizureLatency_60": {
+            "0": 100.69600781643122,
+            "1": 99.96956715384889
+        },
+        "SeizureSeverity_60": {
+            "0": 1.8501045735558534,
+            "1": 2.0073808618907605
+        }
+    },
+    "cohort_size": 60
 }

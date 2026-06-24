@@ -7,9 +7,9 @@ import streamlit as st
 import matplotlib.pyplot as plt
 
 # Import feature engineering and target definition from train_pipeline
-from train_pipeline import compute_engineered_features, define_targets
+from train_pipeline import pivot_and_engineer_data, define_targets
 # Import LIME explainability functions
-from explainability import get_explainers, explain_risk, explain_tms_benefit
+from explainability import get_explainer, explain_risk, explain_tms_benefit
 
 # Page configuration for a premium, wide look
 st.set_page_config(
@@ -92,7 +92,9 @@ def plot_lime_explanation(lime_results, title, classification_type="risk"):
     fig, ax = plt.subplots(figsize=(7, 4.5))
     
     # Sort results by weight so largest impact is at the top
-    lime_results = sorted(lime_results, key=lambda x: x['weight'])
+    # For risk, we show absolute impact
+    # For benefit, we show the signed difference
+    lime_results = sorted(lime_results, key=lambda x: abs(x['weight']))
     
     features = [r['rule'] for r in lime_results]
     weights = [r['weight'] for r in lime_results]
@@ -104,8 +106,8 @@ def plot_lime_explanation(lime_results, title, classification_type="risk"):
         colors = ['#ef4444' if w > 0 else '#22c55e' for w in weights]
     else:
         # For TMS Benefit:
-        # positive weight increases probability of benefit (good treatment response) -> Blue/Green
-        # negative weight decreases probability of benefit -> Grey/Red
+        # positive weight increases risk reduction (benefit) -> Blue
+        # negative weight reduces risk reduction -> Red
         colors = ['#2563eb' if w > 0 else '#ef4444' for w in weights]
         
     bars = ax.barh(features, weights, color=colors, height=0.6)
@@ -127,120 +129,183 @@ def plot_lime_explanation(lime_results, title, classification_type="risk"):
 # Load models and pipeline metadata on startup
 @st.cache_resource
 def load_pipeline_assets():
-    if not (os.path.exists("risk_model.pkl") and os.path.exists("tms_benefit_model.pkl") and os.path.exists("pipeline_metadata.json")):
+    if not (os.path.exists("elastic_net_model.pkl") and os.path.exists("random_forest_model.pkl") and os.path.exists("pipeline_metadata.json")):
         return None
         
-    risk_model = joblib.load("risk_model.pkl")
-    tms_benefit_model = joblib.load("tms_benefit_model.pkl")
+    en_model = joblib.load("elastic_net_model.pkl")
+    rf_model = joblib.load("random_forest_model.pkl")
     
     with open("pipeline_metadata.json", "r") as f:
         metadata = json.load(f)
         
-    # Pre-load dataset to initialize LIME explainers
+    # Pre-load dataset to initialize LIME explainer
     df_raw = pd.read_excel("TBI_sleep_FR_spikes_TMS.xlsx")
-    df = compute_engineered_features(df_raw)
-    df = define_targets(df)
+    df_wide = pivot_and_engineer_data(df_raw)
+    df = define_targets(df_wide)
     
-    # Initialize explainers
-    explainer_s1, explainer_s2 = get_explainers(df, metadata['stage1_features'], metadata['stage2_features'])
+    # Initialize explainer
+    explainer = get_explainer(df, metadata['features'])
     
     return {
-        "risk_model": risk_model,
-        "tms_benefit_model": tms_benefit_model,
+        "en_model": en_model,
+        "rf_model": rf_model,
         "metadata": metadata,
-        "explainer_s1": explainer_s1,
-        "explainer_s2": explainer_s2,
+        "explainer": explainer,
         "df": df
     }
 
 assets = load_pipeline_assets()
 
 if assets is None:
-    st.error("⚠️ Pipeline models and metadata not found. Please run the training pipeline first using: `uv run python train_pipeline.py`")
+    st.error("⚠️ Pipeline models and metadata not found. Please run the training pipeline first using: `.venv/bin/python train_pipeline.py`")
     st.stop()
 
 # Extract preloaded components
-risk_model = assets["risk_model"]
-tms_benefit_model = assets["tms_benefit_model"]
+en_model = assets["en_model"]
+rf_model = assets["rf_model"]
 metadata = assets["metadata"]
-explainer_s1 = assets["explainer_s1"]
-explainer_s2 = assets["explainer_s2"]
+explainer = assets["explainer"]
 feature_medians = metadata["feature_medians"]
 
-# Sidebar Panel: Patient Early Biomarkers Input
-st.sidebar.header("🔧 Early Biomarkers Input")
-st.sidebar.write("Input patient physiological biomarkers below:")
-
-FastRipples = st.sidebar.number_input(
-    "Fast Ripples (Events/hr)", 
-    min_value=0.0, 
-    value=float(feature_medians["FastRipples"]),
-    step=1.0,
-    help="Fast ripples frequency measured in early post-injury phase."
+# Sidebar Panel: Model & Subject Covariates
+st.sidebar.header("⚙️ Configuration")
+model_choice = st.sidebar.selectbox(
+    "Select Classifier Model", 
+    ["Elastic Net Logistic Regression", "Random Forest Classifier"]
 )
 
-Spikes = st.sidebar.number_input(
-    "Spikes (Events/hr)", 
-    min_value=0.0, 
-    value=float(feature_medians["Spikes"]),
-    step=1.0,
-    help="Interictal spike frequency."
-)
+# Choose active model
+selected_model = en_model if model_choice == "Elastic Net Logistic Regression" else rf_model
 
-NREM = st.sidebar.slider(
-    "NREM Sleep (%)", 
-    min_value=0.0, 
-    max_value=100.0, 
-    value=float(feature_medians["NREM"]),
-    help="NREM sleep duration as percentage of total recording time."
+SD_choice = st.sidebar.selectbox(
+    "Subject Baseline State (Sleep Deprivation)",
+    ["Normal Sleep Pattern", "Sleep Deprived (SD)"]
 )
-
-REM = st.sidebar.slider(
-    "REM Sleep (%)", 
-    min_value=0.0, 
-    max_value=100.0, 
-    value=float(feature_medians["REM"]),
-    help="REM sleep duration as percentage of total recording time."
-)
-
-Wake = st.sidebar.slider(
-    "Wake State (%)", 
-    min_value=0.0, 
-    max_value=100.0, 
-    value=float(feature_medians["Sleep_Fragmentation"] * (NREM + REM) / 120.0), # Derived roughly
-    help="Wakefulness percentage."
-)
-
-DPI = st.sidebar.number_input(
-    "Days Post-Injury (DPI)", 
-    min_value=0, 
-    value=int(feature_medians["DPI"]),
-    step=1,
-    help="Days post-injury when biomarkers were collected."
-)
-
-# Automated feature engineering from user inputs
-FR_Delta_Coupling = (FastRipples * NREM) / 100.0
-Sleep_Fragmentation = (Wake / (NREM + REM + 1e-5)) * 100.0
+SD = 1 if SD_choice == "Sleep Deprived (SD)" else 0
 
 st.sidebar.markdown("---")
+
+# Sidebar: Section A (21 DPI Inputs)
+st.sidebar.subheader("📅 Section A: 21 DPI Inputs")
+FastRipples_21 = st.sidebar.number_input(
+    "Fast Ripples (Events/hr) [21 DPI]", 
+    min_value=0.0, 
+    value=float(feature_medians["FastRipples_21"]),
+    step=1.0,
+    help="Fast ripples frequency measured at 21 days post-injury."
+)
+
+Spikes_21 = st.sidebar.number_input(
+    "Interictal Spikes (Events/hr) [21 DPI]", 
+    min_value=0.0, 
+    value=float(feature_medians["Spikes_21"]),
+    step=1.0,
+    help="Spike frequency measured at 21 days post-injury."
+)
+
+NREM_21 = st.sidebar.slider(
+    "NREM Sleep (%) [21 DPI]", 
+    min_value=0.0, 
+    max_value=100.0, 
+    value=float(feature_medians["NREM_21"]),
+    help="NREM sleep percentage at 21 DPI."
+)
+
+REM_21 = st.sidebar.slider(
+    "REM Sleep (%) [21 DPI]", 
+    min_value=0.0, 
+    max_value=100.0, 
+    value=float(feature_medians["REM_21"]),
+    help="REM sleep percentage at 21 DPI."
+)
+
+Wake_21 = st.sidebar.slider(
+    "Wake State (%) [21 DPI]", 
+    min_value=0.0, 
+    max_value=100.0, 
+    value=float(feature_medians["Wake_21"]),
+    help="Wake percentage at 21 DPI."
+)
+
+# Sidebar: Section B (28 DPI Inputs)
+st.sidebar.subheader("📅 Section B: 28 DPI Inputs")
+FastRipples_28 = st.sidebar.number_input(
+    "Fast Ripples (Events/hr) [28 DPI]", 
+    min_value=0.0, 
+    value=float(feature_medians["FastRipples_28"]),
+    step=1.0,
+    help="Fast ripples frequency measured at 28 days post-injury."
+)
+
+Spikes_28 = st.sidebar.number_input(
+    "Interictal Spikes (Events/hr) [28 DPI]", 
+    min_value=0.0, 
+    value=float(feature_medians["Spikes_28"]),
+    step=1.0,
+    help="Spike frequency measured at 28 days post-injury."
+)
+
+NREM_28 = st.sidebar.slider(
+    "NREM Sleep (%) [28 DPI]", 
+    min_value=0.0, 
+    max_value=100.0, 
+    value=float(feature_medians["NREM_28"]),
+    help="NREM sleep percentage at 28 DPI."
+)
+
+REM_28 = st.sidebar.slider(
+    "REM Sleep (%) [28 DPI]", 
+    min_value=0.0, 
+    max_value=100.0, 
+    value=float(feature_medians["REM_28"]),
+    help="REM sleep percentage at 28 DPI."
+)
+
+Wake_28 = st.sidebar.slider(
+    "Wake State (%) [28 DPI]", 
+    min_value=0.0, 
+    max_value=100.0, 
+    value=float(feature_medians["Wake_28"]),
+    help="Wake percentage at 28 DPI."
+)
+
+# Automated feature engineering from inputs
+Sleep_Fragmentation_21 = (Wake_21 / (NREM_21 + REM_21 + 1e-5)) * 100
+FR_Delta_Coupling_21 = (FastRipples_21 * NREM_21) / 100.0
+
+Sleep_Fragmentation_28 = (Wake_28 / (NREM_28 + REM_28 + 1e-5)) * 100
+FR_Delta_Coupling_28 = (FastRipples_28 * NREM_28) / 100.0
+
+# Sidebar engineered feature displays
+st.sidebar.markdown("---")
 st.sidebar.write("### Calculated Features")
-st.sidebar.markdown(f"**FR-Delta Coupling:** `{FR_Delta_Coupling:.2f}`")
-st.sidebar.markdown(f"**Sleep Fragmentation Index:** `{Sleep_Fragmentation:.2f}`")
+st.sidebar.markdown(f"**Sleep Fragmentation (21 DPI):** `{Sleep_Fragmentation_21:.1f}%`")
+st.sidebar.markdown(f"**FR-Delta Coupling (21 DPI):** `{FR_Delta_Coupling_21:.2f}`")
+st.sidebar.markdown(f"**Sleep Fragmentation (28 DPI):** `{Sleep_Fragmentation_28:.1f}%`")
+st.sidebar.markdown(f"**FR-Delta Coupling (28 DPI):** `{FR_Delta_Coupling_28:.2f}`")
 
 
 # Main Dashboard Header
-st.title("🧠 Epilepsy Risk Stratification & TMS Treatment response")
-st.markdown("### Clinical Decision Support System using Early Biomarkers")
+st.title("🧠 Epilepsy Risk Stratification & TMS Treatment Response")
+st.markdown("### Preclinical Pre-Injury EEG Biomarker Decision Support System (Proof of Concept)")
 st.markdown("---")
 
+# Sleep sum validations
+total_sleep_21 = NREM_21 + REM_21 + Wake_21
+total_sleep_28 = NREM_28 + REM_28 + Wake_28
+if abs(total_sleep_21 - 100.0) > 1e-2 or abs(total_sleep_28 - 100.0) > 1e-2:
+    st.warning(
+        f"⚠️ **Sleep Percentage Notice**: The sleep percentages for 21 DPI sum to **{total_sleep_21:.1f}%** "
+        f"and for 28 DPI sum to **{total_sleep_28:.1f}%**. For physiological accuracy, "
+        "sliders should sum to approximately 100%."
+    )
+
 # Layout: Split into tabs
-tab_overview, tab_risk, tab_tms, tab_explain, tab_metrics = st.tabs([
+tab_overview, tab_risk, tab_tms, tab_metrics = st.tabs([
     "📊 Pipeline Overview", 
     "🧠 Stage 1: Risk Stratification", 
     "⚡ Stage 2: TMS Response Analysis",
-    "🔍 LIME Explainability",
-    "📋 Model Metrics & Cohort Limitations"
+    "📋 Model Metrics & Validation Rigor"
 ])
 
 # ----------------- Tab 1: Pipeline Overview -----------------
@@ -249,49 +314,57 @@ with tab_overview:
     
     with col1:
         st.markdown("""
-        ### Re-framed Two-Stage Predictive Pipeline
+        ### Causal Inference S-Learner Pipeline Redesign
         
-        This decision support tool uses a **two-stage predictive workflow** designed to address clinical utility and mitigate overfitting on small cohorts:
+        This decision support system implements a **causal inference framework** using a unified **S-Learner model** to address the limitations of small preclinical datasets ($N=60$ subjects) and repeated-measures leakage:
         
-        1. **Stage 1 — Epilepsy Risk Stratification Model**:
-           - Analyzes early biomarkers (`Fast Ripples`, `Spike Frequency`, `NREM/REM Sleep percentage`, `FR-Delta Coupling`, and `Sleep Fragmentation`) to estimate the overall risk of epilepsy progression.
-           - Outputs a **Risk Score (0–1)** representing the probability of developing a severe seizure phenotype (defined by high seizure severity, low latency, and low threshold).
+        1. **Subject-Level Wide Schema**:
+           - All longitudinal measures are pivoted on the subject ID (`AnimalID`). Each row represents one subject.
+           - `DPI` (Days Post-Injury) is completely **removed** as a feature, eliminating temporal bias and extrapolation errors.
+           - Biomarkers from early timepoints (**21 DPI** and **28 DPI**) serve as inputs to predict late-stage outcomes (**60 DPI**).
         
-        2. **Stage 2 — TMS Treatment Effect Model**:
-           - Compares the expected outcomes under the TMS treatment group vs. the non-TMS control group.
-           - Computes the estimated **TMS Treatment Benefit** (absolute risk reduction/improvement in seizure outcome) for this specific patient's risk stratum and biomarker profile.
-           - Outputs a recommendation: **Likely benefit from TMS** or **Low benefit**.
+        2. **Stage 1 — Baseline Risk Stratification**:
+           - Predicts the counterfactual probability of the subject developing a high-severity seizure phenotype at 60 DPI if left untreated:
+             $$\\text{Risk Score} = P(\\text{High Risk}_{60} = 1 \\mid \\text{Biomarkers},\\text{TMS}=0)$$
+        
+        3. **Stage 2 — Counterfactual TMS Benefit**:
+           - Compares the predicted risk under treatment ($TMS=1$) vs. no treatment ($TMS=0$). The **TMS Treatment Benefit** is defined as the absolute risk reduction (ARR):
+             $$\\text{TMS Benefit} = P(\\text{High Risk}_{60} = 1 \\mid \\text{Biomarkers},\\text{TMS}=0) - P(\\text{High Risk}_{60} = 1 \\mid \\text{Biomarkers},\\text{TMS}=1)$$
         """)
     
     with col2:
         st.info("""
         **How to use this dashboard:**
-        1. Adjust patient biomarkers in the left sidebar.
-        2. View **Stage 1** tab to analyze the epilepsy risk profile.
-        3. View **Stage 2** tab to see if the patient is expected to benefit from TMS.
-        4. View **LIME Explainability** tab to inspect the physiological drivers behind both predictions.
+        1. Select your preferred classifier model in the sidebar.
+        2. Select the subject baseline state (Sleep Deprived vs. Normal Sleep).
+        3. Adjust early biomarkers at 21 DPI (Section A) and 28 DPI (Section B).
+        4. Inspect **Stage 1** for epilepsy risk and **Stage 2** for counterfactual treatment response.
         """)
         
         st.warning("""
-        **Research Cohort Notice**:
-        This model was trained on a small cohort of animals (n=~8 unique subjects with 180 longitudinal repeated measures). Validation was performed strictly using Leave-One-Subject-Out (LOSO) cross-validation to prevent data leakage.
+        **Methodology Paper Framing Notice**:
+        This tool is intended for a preliminary Method Paper. It represents a proof-of-concept framework to demonstrate how machine learning can assess preclinical TMS outcomes. It is not approved for clinical diagnostic or treatment decisions in humans.
         """)
 
-# Run inference
-# Prepare input vector for Stage 1
-X1_input = [FastRipples, Spikes, NREM, REM, FR_Delta_Coupling, Sleep_Fragmentation, DPI]
-prob_risk = risk_model.predict_proba([X1_input])[0][1]
-pred_risk = risk_model.predict([X1_input])[0]
+# Construct the model input vector (16 elements)
+X_input = [
+    FastRipples_21, Spikes_21, NREM_21, REM_21, Wake_21, Sleep_Fragmentation_21, FR_Delta_Coupling_21,
+    FastRipples_28, Spikes_28, NREM_28, REM_28, Wake_28, Sleep_Fragmentation_28, FR_Delta_Coupling_28,
+    SD,
+    0 # Placeholder for TMS
+]
 
-# Prepare input vector for Stage 2 (with TMS=1 and TMS=0)
-# Stage 2 features: stage1_features + ["Risk_Score", "TMS"]
-# Using the predicted probability from Stage 1 as the Risk_Score feature
-X2_input_tms1 = X1_input + [prob_risk, 1]
-X2_input_tms0 = X1_input + [prob_risk, 0]
+# Compute counterfactuals
+X_tms0 = X_input.copy()
+X_tms0[-1] = 0  # TMS = 0
 
-prob_good_tms1 = tms_benefit_model.predict_proba([X2_input_tms1])[0][1]
-prob_good_tms0 = tms_benefit_model.predict_proba([X2_input_tms0])[0][1]
-tms_benefit = prob_good_tms1 - prob_good_tms0
+X_tms1 = X_input.copy()
+X_tms1[-1] = 1  # TMS = 1
+
+# Model Inference
+prob_risk = selected_model.predict_proba([X_tms0])[0][1]
+prob_treated = selected_model.predict_proba([X_tms1])[0][1]
+tms_benefit = prob_risk - prob_treated  # Absolute Risk Reduction
 
 # ----------------- Tab 2: Stage 1 - Risk Stratification -----------------
 with tab_risk:
@@ -299,124 +372,98 @@ with tab_risk:
     
     with col1:
         st.subheader("Stage 1: Epilepsy Progression Risk Stratification")
-        st.write("Predicts the probability of severe epilepsy progression based on early physiological biomarkers.")
+        st.write("Predicts the baseline probability of severe epilepsy progression at 60 DPI in the absence of treatment.")
         
-        # Risk Score Display
-        st.metric(label="Predicted Epilepsy Progression Risk Score", value=f"{prob_risk:.2%}")
+        # Risk Score Metric
+        st.metric(label="Predicted Baseline Epilepsy Risk (Untreated)", value=f"{prob_risk:.2%}")
         
-        # Risk status badge
+        # Risk status badge (threshold = 0.5)
         if prob_risk > 0.5:
             st.markdown('<div class="status-badge status-badge-high">⚠️ HIGH RISK PROFILE</div>', unsafe_allow_html=True)
             st.markdown("""
-            * **Clinical Interpretation**: The patient's biomarkers strongly align with animals that exhibited accelerated epilepsy progression, including high seizure severity, rapid onset (low latency), and lower seizure thresholds.
+            * **Interpretation**: The subject's early biomarker trajectories (21 to 28 DPI) strongly match animals that progressed to a severe epileptic phenotype at 60 DPI (low threshold, short latency, high severity).
             """)
         else:
             st.markdown('<div class="status-badge status-badge-low">✅ LOW RISK PROFILE</div>', unsafe_allow_html=True)
             st.markdown("""
-            * **Clinical Interpretation**: The patient's biomarkers align with a milder epilepsy progression path, characterized by lower seizure severity and longer latencies.
+            * **Interpretation**: The subject's early biomarker trajectories align with a mild seizure phenotype at 60 DPI.
             """)
             
     with col2:
         st.subheader("Risk Contribution Drivers")
-        st.write("Top biomarker drivers contributing to the patient's epilepsy risk score:")
-        # Generate LIME explanation for Stage 1
-        lime_results_s1 = explain_risk(explainer_s1, risk_model, X1_input, metadata['stage1_features'])
-        fig_s1 = plot_lime_explanation(lime_results_s1, "Local Biomarker Contribution to Epilepsy Risk", "risk")
-        st.pyplot(fig_s1)
+        st.write("LIME local explanations: how early biomarkers shape the baseline risk score.")
+        
+        # Generate LIME explanation
+        lime_results_risk = explain_risk(explainer, selected_model, X_input, metadata['features'])
+        fig_risk = plot_lime_explanation(lime_results_risk, f"Biomarker Drivers of Baseline Epilepsy Risk ({model_choice})", "risk")
+        st.pyplot(fig_risk)
 
 # ----------------- Tab 3: Stage 2 - TMS Response Analysis -----------------
 with tab_tms:
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        st.subheader("Stage 2: Transcranial Magnetic Stimulation (TMS) Benefit Analysis")
-        st.write("Compares outcomes with TMS vs. without TMS for the patient's specific risk stratum and biomarker profile.")
+        st.subheader("Stage 2: Counterfactual TMS Benefit Analysis")
+        st.write("Evaluates the counterfactual treatment benefit by setting the treatment indicator to active vs. inactive.")
         
-        # Display counterfactual probabilities
-        st.write(f"**Probability of Good Outcome (No TMS)**: `{prob_good_tms0:.2%}`")
-        st.write(f"**Probability of Good Outcome (With TMS)**: `{prob_good_tms1:.2%}`")
+        # Counterfactual output display
+        st.write(f"**Baseline Risk (No TMS)**: `{prob_risk:.2%}`")
+        st.write(f"**Counterfactual Risk (With TMS)**: `{prob_treated:.2%}`")
         
-        # Net Benefit Score
+        # Net Benefit Score (ARR)
         st.metric(label="Estimated Net TMS Treatment Benefit (ARR)", value=f"{tms_benefit:+.2%}")
         
-        # Treatment response recommendation
+        # Treatment response recommendation (Threshold at 5% risk reduction)
         if tms_benefit > 0.05:
             st.markdown('<div class="status-badge status-badge-benefit">⚡ LIKELY TO BENEFIT FROM TMS</div>', unsafe_allow_html=True)
             st.markdown(f"""
-            * **Clinical Recommendation**: Administering TMS is predicted to improve the likelihood of a good seizure outcome by **{tms_benefit:.1%}** (absolute increase in probability of high threshold, high latency, and low severity).
+            * **Recommendation**: TMS is predicted to reduce the subject's probability of developing a severe epileptic phenotype by **{tms_benefit:.1%}**.
             """)
         else:
             st.markdown('<div class="status-badge status-badge-no-benefit">❌ LOW BENEFIT FROM TMS</div>', unsafe_allow_html=True)
             st.markdown(f"""
-            * **Clinical Recommendation**: TMS shows a marginal predicted outcome difference (**{tms_benefit:.1%}**) for this biomarker profile. Alternative treatments or monitoring should be considered.
+            * **Recommendation**: TMS treatment yields a marginal predicted change in risk (**{tms_benefit:.1%}** ARR). Alternative strategies or monitoring should be prioritized.
             """)
             
     with col2:
         st.subheader("TMS Response Drivers")
-        st.write("Top feature interactions driving the predicted response to TMS:")
+        st.write("LIME counterfactual local explanations: which biomarkers drive the risk reduction.")
         
         # Generate LIME explanation for Stage 2 Treatment Benefit
-        # Explain Stage 2 model by comparing explanations under TMS=1 vs TMS=0
-        # stage2_features contains TMS at the end, so we pass the vector of features
-        # where we will overwrite TMS during explanation.
-        lime_results_s2 = explain_tms_benefit(explainer_s2, tms_benefit_model, X2_input_tms1, metadata['stage2_features'])
-        fig_s2 = plot_lime_explanation(lime_results_s2, "Local Feature Contribution to TMS Response Benefit", "benefit")
-        st.pyplot(fig_s2)
+        lime_results_tms = explain_tms_benefit(explainer, selected_model, X_input, metadata['features'])
+        fig_tms = plot_lime_explanation(lime_results_tms, f"Biomarker Drivers of TMS Treatment Benefit ({model_choice})", "benefit")
+        st.pyplot(fig_tms)
 
-# ----------------- Tab 4: LIME Explainability -----------------
-with tab_explain:
-    st.subheader("🔍 LIME Explanations Panel")
-    st.markdown("""
-    LIME (Local Interpretable Model-agnostic Explanations) approximates the complex model locally using a simple linear model around this patient's specific biomarker profile.
-    This reveals **how each physiological feature shifts the model's output** for this particular case.
-    """)
-    
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        st.write("### Stage 1: Epilepsy Risk Drivers")
-        for res in lime_results_s1:
-            color = "🔴" if res['weight'] > 0 else "🟢"
-            direction = "increases" if res['weight'] > 0 else "decreases"
-            st.markdown(f"{color} **{res['rule']}** {direction} epilepsy risk score by **{abs(res['weight']):.2f}**")
-            
-    with col2:
-        st.write("### Stage 2: TMS Responsiveness Drivers")
-        for res in lime_results_s2:
-            color = "🔵" if res['weight'] > 0 else "🔴"
-            direction = "improves" if res['weight'] > 0 else "reduces"
-            st.markdown(f"{color} **{res['rule']}** {direction} TMS treatment efficacy by **{abs(res['weight']):.2f}**")
-
-# ----------------- Tab 5: Model Metrics & Cohort Limitations -----------------
+# ----------------- Tab 4: Model Metrics & Validation Rigor -----------------
 with tab_metrics:
-    st.subheader("📋 Model Validation Metrics & Clinical Limitations")
+    st.subheader("📋 Leave-One-Out Cross-Validation (LOOCV) & Validation Rigor")
     
     st.markdown("""
-    ### Acknowledgment of Sample Size Concerns & Overfitting Risk
-    When modeling preclinical datasets, overfitting is a major risk due to repeated longitudinal measures on a small cohort of subjects.
+    ### Validation Safeguards Against Overfitting and Repeated Measures
+    Preclinical datasets with small sample sizes are highly vulnerable to inflated validation scores. 
+    This redesigned pipeline introduces key safeguards to ensure publication-grade validity:
     
-    To address this concern and ensure publication-quality validation, the pipeline implements the following safeguards:
-    
-    1. **Subject-Level Data Splitting**:
-       - We explicitly avoid standard row-level random train/test splits.
-       - A random row-level split would leak different days post-injury (DPI) from the same subject into both the training and test sets, artificially inflating validation accuracy.
-    2. **Leave-One-Subject-Out (LOSO) Cross-Validation**:
-       - The validation results reported below are generated by leaving all records of one unique animal out per fold, training on the remaining animals, and testing on the held-out animal.
-       - This strictly measures the model's generalizability to *new, unseen subjects*.
-    3. **Model Regularization**:
-       - Extremely conservative tree depths (`max_depth=2`) and high regularization parameter values (`reg_alpha=1.5`, `reg_lambda=1.5`) are enforced.
+    1. **Elimination of Repeated Measures**: By reshaping the dataset to a subject-level format, each animal constitutes exactly one independent row ($N=60$). This prevents temporal data leakage between rows.
+    2. **Leave-One-Out Cross-Validation (LOOCV)**: In each fold, a model is trained on $N-1$ animals ($59$ subjects) and validated on the remaining $1$ subject. This strictly evaluates generalization to unseen animals.
+    3. **Bootstrapped Confidence Intervals**: Standard point estimates do not reflect the uncertainty of small sample sizes. We report performance metrics with **95% Confidence Intervals** computed via 1000 bootstrap resamples of the LOOCV predictions.
     """)
     
-    # Display validation metrics loaded from metadata
     metrics = metadata["metrics"]
     
     col1, col2 = st.columns([1, 1])
+    
     with col1:
-        st.markdown("#### Stage 1: Risk Model Validation")
-        st.write(f"- **Leave-One-Subject-Out (LOSO) CV Accuracy**: `{metrics['stage1_loso_accuracy']:.2%}`")
-        st.write(f"- **LOSO CV ROC-AUC Score**: `{metrics['stage1_loso_auc']:.2%}`")
+        st.markdown("#### 📈 Elastic Net Logistic Regression")
+        m_en = metrics["elastic_net"]
+        st.write(f"- **LOOCV Accuracy**: `{m_en['accuracy']['mean']:.2%}` (95% CI: `{m_en['accuracy']['lower']:.2%}` - `{m_en['accuracy']['upper']:.2%}`)")
+        st.write(f"- **LOOCV ROC-AUC Score**: `{m_en['auc']['mean']:.2%}` (95% CI: `{m_en['auc']['lower']:.2%}` - `{m_en['auc']['upper']:.2%}`)")
+        st.write(f"- **LOOCV F1-Score**: `{m_en['f1']['mean']:.2%}` (95% CI: `{m_en['f1']['lower']:.2%}` - `{m_en['f1']['upper']:.2%}`)")
+        st.info("💡 **Elastic Net** acts as a linear baseline and features strong L1 regularization (`C=0.5`), forcing non-contributing biomarker coefficients to zero to perform automatic feature selection.")
         
     with col2:
-        st.markdown("#### Stage 2: TMS Benefit Model Validation")
-        st.write(f"- **Leave-One-Subject-Out (LOSO) CV Accuracy**: `{metrics['stage2_loso_accuracy']:.2%}`")
-        st.write(f"- **LOSO CV ROC-AUC Score**: `{metrics['stage2_loso_auc']:.2%}`")
+        st.markdown("#### 🌳 Random Forest Classifier")
+        m_rf = metrics["random_forest"]
+        st.write(f"- **LOOCV Accuracy**: `{m_rf['accuracy']['mean']:.2%}` (95% CI: `{m_rf['accuracy']['lower']:.2%}` - `{m_rf['accuracy']['upper']:.2%}`)")
+        st.write(f"- **LOOCV ROC-AUC Score**: `{m_rf['auc']['mean']:.2%}` (95% CI: `{m_rf['auc']['lower']:.2%}` - `{m_rf['auc']['upper']:.2%}`)")
+        st.write(f"- **LOOCV F1-Score**: `{m_rf['f1']['mean']:.2%}` (95% CI: `{m_rf['f1']['lower']:.2%}` - `{m_rf['f1']['upper']:.2%}`)")
+        st.info("💡 **Random Forest** captures potential non-linear biomarker interactions. Its tree depth is strictly limited (`max_depth=3`) to prevent it from memorizing the small training set.")

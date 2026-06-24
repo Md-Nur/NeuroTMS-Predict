@@ -3,58 +3,48 @@ import numpy as np
 import lime
 import lime.lime_tabular
 
-def get_explainers(df, stage1_features, stage2_features):
+def get_explainer(df, features):
     """
-    Initializes LIME explainers for Stage 1 (Risk Model) and Stage 2 (TMS Benefit/Outcome Model).
+    Initializes a LIME explainer for the subject-level dataset.
+    The explainer is trained on all 16 features (biomarkers + SD + TMS).
     """
-    # Stage 1 Explainer
-    # We pass the training data as a numpy array
-    explainer_stage1 = lime.lime_tabular.LimeTabularExplainer(
-        training_data=df[stage1_features].values,
-        feature_names=stage1_features,
+    return lime.lime_tabular.LimeTabularExplainer(
+        training_data=df[features].values,
+        feature_names=features,
         class_names=['Low Risk', 'High Risk'],
         mode='classification',
         random_state=42
     )
-    
-    # Stage 2 Explainer
-    explainer_stage2 = lime.lime_tabular.LimeTabularExplainer(
-        training_data=df[stage2_features].values,
-        feature_names=stage2_features,
-        class_names=['Low Benefit/Outcome', 'Good Outcome'],
-        mode='classification',
-        random_state=42
-    )
-    
-    return explainer_stage1, explainer_stage2
 
 def explain_risk(explainer, model, input_vector, feature_names):
     """
-    Explains the Stage 1 Risk prediction for a single patient input.
-    Returns a list of tuples: (feature_name, contribution_weight, rule_description)
+    Explains the baseline risk prediction (TMS = 0) for a single subject.
+    Returns a list of dictionaries with features, weights, and rules.
     """
-    # input_vector should be a 1D numpy array or list of shape (n_features,)
+    # Ensure TMS is set to 0 for baseline risk
+    tms_idx = feature_names.index("TMS")
+    input_vector_tms0 = np.array(input_vector).copy()
+    input_vector_tms0[tms_idx] = 0
+    
+    # Explain relative to Class 1 (High Risk)
     exp = explainer.explain_instance(
-        data_row=np.array(input_vector),
+        data_row=input_vector_tms0,
         predict_fn=model.predict_proba,
         num_features=len(feature_names)
     )
     
-    # LIME returns list of tuples: (feature_index, weight)
-    # We map feature_index back to feature_name and get the decision rules
-    map_exp = exp.as_map()[1]  # get explanations for class 1 (High Risk)
+    # LIME returns list of tuples: (rule_string, weight)
+    rules = exp.as_list()
     
     results = []
-    # Decision rules are in exp.as_list()
-    rules = exp.as_list() # list of tuples: ('rule_string', weight)
-    
     for rule, weight in rules:
-        # Find which feature name is in the rule string
         matched_feature = "Unknown"
         for name in feature_names:
             if name in rule:
                 matched_feature = name
                 break
+        if matched_feature == "TMS":
+            continue
         results.append({
             "feature": matched_feature,
             "weight": weight,
@@ -63,59 +53,64 @@ def explain_risk(explainer, model, input_vector, feature_names):
         
     return results
 
-def explain_tms_benefit(explainer, model, input_vector_without_tms, feature_names):
+def explain_tms_benefit(explainer, model, input_vector, feature_names):
     """
-    Explains the TMS Treatment Benefit by comparing LIME explanations 
-    under TMS = 1 and TMS = 0.
-    Returns the net feature contributions to the TMS benefit.
+    Explains the TMS treatment benefit (Absolute Risk Reduction) by comparing
+    LIME explanations under TMS = 0 (baseline) vs TMS = 1 (treated).
+    
+    Benefit is: P(High Risk | TMS=0) - P(High Risk | TMS=1)
+    
+    Thus, a feature contributes positively to the benefit if it increases risk when untreated
+    and that risk is reduced when treated: net_weight = weight_tms0 - weight_tms1.
     """
-    # Find feature indices of TMS and Risk_Score
     tms_idx = feature_names.index("TMS")
     
-    # Create input vector with TMS = 1
-    input_tms1 = np.array(input_vector_without_tms).copy()
-    input_tms1[tms_idx] = 1
-    
     # Create input vector with TMS = 0
-    input_tms0 = np.array(input_vector_without_tms).copy()
+    input_tms0 = np.array(input_vector).copy()
     input_tms0[tms_idx] = 0
     
-    # Explain both instances relative to class 1 (Good Outcome)
-    exp_tms1 = explainer.explain_instance(
-        data_row=input_tms1,
-        predict_fn=model.predict_proba,
-        num_features=len(feature_names)
-    )
+    # Create input vector with TMS = 1
+    input_tms1 = np.array(input_vector).copy()
+    input_tms1[tms_idx] = 1
     
+    # Explain both instances relative to Class 1 (High Risk)
     exp_tms0 = explainer.explain_instance(
         data_row=input_tms0,
         predict_fn=model.predict_proba,
         num_features=len(feature_names)
     )
     
-    # Map index to weight
-    weights_tms1 = {idx: weight for idx, weight in exp_tms1.as_map()[1]}
+    exp_tms1 = explainer.explain_instance(
+        data_row=input_tms1,
+        predict_fn=model.predict_proba,
+        num_features=len(feature_names)
+    )
+    
+    # Map feature index to weight
     weights_tms0 = {idx: weight for idx, weight in exp_tms0.as_map()[1]}
+    weights_tms1 = {idx: weight for idx, weight in exp_tms1.as_map()[1]}
     
-    # Calculate net benefit contribution: weight_tms1 - weight_tms0
+    # Get decision rules under untreated baseline for descriptions
+    rules_tms0 = {r[0].split()[0]: r[0] for r in exp_tms0.as_list()}
+    
     net_contributions = []
-    
-    # decision rules for displaying
-    rules_tms1 = {r[0].split()[0]: r[0] for r in exp_tms1.as_list()}
     
     for idx, feature_name in enumerate(feature_names):
         # We ignore TMS feature itself in the final feature contribution chart
-        # because we are explaining the effect of changing TMS
+        # because we are explaining the benefit of modifying TMS.
         if feature_name == "TMS":
             continue
             
-        w1 = weights_tms1.get(idx, 0.0)
         w0 = weights_tms0.get(idx, 0.0)
-        net_weight = w1 - w0
+        w1 = weights_tms1.get(idx, 0.0)
         
-        # Get rule description
-        rule_desc = rules_tms1.get(feature_name, f"{feature_name} profile")
+        # Positive net weight means risk is lower with TMS: weight_tms0 - weight_tms1
+        net_weight = w0 - w1
         
+        rule_desc = rules_tms0.get(feature_name, f"{feature_name} profile")
+        
+        # Clean up rule description to reflect the biomarker name
+        # (LIME generates strings like 'FastRipples_21 > 5.0')
         net_contributions.append({
             "feature": feature_name,
             "weight": net_weight,
