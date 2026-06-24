@@ -190,15 +190,15 @@ def run_pipeline():
     print(f"Experimental group distribution:\n{df['Group'].value_counts()}")
     print(f"High risk target distribution: {y.value_counts().to_dict()}")
     
-    # ------------------ DEFINE INTERPRETABLE MODELS ------------------
+    # ------------------ DEFINE INTERPRETABLE MODEL ------------------
     
-    # Model 1: Elastic Net Logistic Regression (S-Learner)
+    # Model: Elastic Net Logistic Regression (S-Learner)
     # saga solver is required for l1+l2 elasticnet penalty. 
     # C=0.5 provides strong L1 regularization to encourage feature sparsity (selection).
+    # Setting l1_ratio=0.5 and solver='saga' without setting penalty parameter avoids warnings in sklearn 1.8+.
     clf_en = Pipeline([
         ('scaler', StandardScaler()),
         ('clf', LogisticRegression(
-            penalty='elasticnet', 
             solver='saga', 
             l1_ratio=0.5, 
             C=0.5, 
@@ -206,15 +206,6 @@ def run_pipeline():
             max_iter=10000
         ))
     ])
-    
-    # Model 2: Random Forest Classifier (S-Learner)
-    # Restricted tree depth to prevent overfitting on small cohort
-    clf_rf = RandomForestClassifier(
-        n_estimators=100,
-        max_depth=3,
-        min_samples_leaf=3,
-        random_state=42
-    )
     
     # ------------------ LEAVE-ONE-OUT VALIDATION ------------------
     print("\n=== Validating Elastic Net Model (LOOCV) ===")
@@ -224,29 +215,22 @@ def run_pipeline():
     print(f"ROC-AUC:  {en_ci['auc']['mean']:.4f} (95% CI: {en_ci['auc']['lower']:.4f} - {en_ci['auc']['upper']:.4f})")
     print(f"F1-Score: {en_ci['f1']['mean']:.4f} (95% CI: {en_ci['f1']['lower']:.4f} - {en_ci['f1']['upper']:.4f})")
     
-    print("\n=== Validating Random Forest Model (LOOCV) ===")
-    rf_probs, rf_preds = run_loocv(X, y, clf_rf)
-    rf_ci = compute_bootstrap_ci(y.values, rf_probs, rf_preds)
-    print(f"Accuracy: {rf_ci['accuracy']['mean']:.4f} (95% CI: {rf_ci['accuracy']['lower']:.4f} - {rf_ci['accuracy']['upper']:.4f})")
-    print(f"ROC-AUC:  {rf_ci['auc']['mean']:.4f} (95% CI: {rf_ci['auc']['lower']:.4f} - {rf_ci['auc']['upper']:.4f})")
-    print(f"F1-Score: {rf_ci['f1']['mean']:.4f} (95% CI: {rf_ci['f1']['lower']:.4f} - {rf_ci['f1']['upper']:.4f})")
-    
-    # ------------------ FIT FINAL MODELS ------------------
-    print("\n=== Fitting Final Models on Complete Dataset ===")
+    # ------------------ FIT FINAL MODEL ------------------
+    print("\n=== Fitting Final Model on Complete Dataset ===")
     clf_en.fit(X, y)
-    clf_rf.fit(X, y)
     
-    # Save models
-    joblib.dump(clf_en, "elastic_net_model.pkl")
-    joblib.dump(clf_rf, "random_forest_model.pkl")
+    # Save the single model as risk_model.pkl
+    joblib.dump(clf_en, "risk_model.pkl")
+    print("Saved risk_model.pkl")
     
-    # For backward compatibility, save the best-performing model as risk_model.pkl
-    # (We compare LOOCV AUCs to decide)
-    best_model_name = "Elastic Net" if en_ci['auc']['mean'] >= rf_ci['auc']['mean'] else "Random Forest"
-    best_model = clf_en if best_model_name == "Elastic Net" else clf_rf
-    joblib.dump(best_model, "risk_model.pkl")
-    print(f"Saved {best_model_name} as the default 'risk_model.pkl'")
-    print("Saved elastic_net_model.pkl and random_forest_model.pkl")
+    # Extract coefficients and scaler parameters for explanations
+    scaler = clf_en.named_steps['scaler']
+    clf = clf_en.named_steps['clf']
+    
+    scaler_mean = dict(zip(model_features, scaler.mean_.tolist()))
+    scaler_scale = dict(zip(model_features, scaler.scale_.tolist()))
+    coefficients = dict(zip(model_features, clf.coef_[0].tolist()))
+    intercept = float(clf.intercept_[0])
     
     # ------------------ SAVE METADATA ------------------
     # Medians for default slider inputs
@@ -265,14 +249,13 @@ def run_pipeline():
                 "accuracy": en_ci['accuracy'],
                 "auc": en_ci['auc'],
                 "f1": en_ci['f1']
-            },
-            "random_forest": {
-                "accuracy": rf_ci['accuracy'],
-                "auc": rf_ci['auc'],
-                "f1": rf_ci['f1']
             }
         },
-        "best_model_name": best_model_name,
+        "best_model_name": "Elastic Net",
+        "intercept": intercept,
+        "coefficients": coefficients,
+        "scaler_mean": scaler_mean,
+        "scaler_scale": scaler_scale,
         "outcome_stats": outcome_stats,
         "cohort_size": int(len(df))
     }
