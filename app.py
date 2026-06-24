@@ -1,10 +1,14 @@
 # app.py
 import os
+import sys
 import json
 import joblib
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
+
+# Ensure the app's directory is in the python path for Streamlit Cloud imports
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Import feature engineering and target definition from train_pipeline
 from train_pipeline import pivot_and_engineer_data, define_targets

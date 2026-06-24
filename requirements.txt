@@ -6,3 +6,5 @@ joblib
 pandas
 numpy
 lime
+openpyxl
+matplotlib
